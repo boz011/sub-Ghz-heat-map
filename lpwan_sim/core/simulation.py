@@ -73,6 +73,11 @@ class Simulation:
             dist = env.distance_grid(tx.x, tx.y)
             freq = tx.protocol.frequency_mhz
             pl = self._path_loss(dist, freq)
+
+            # Add obstacle attenuation
+            obs_att = env.obstacle_attenuation_grid(tx.x, tx.y)
+            pl = pl + obs_att
+
             rssi = tx.eirp_dbm - pl
             label = tx.label or f"tx_{idx}"
             result.rssi[label] = rssi
@@ -88,6 +93,11 @@ class Simulation:
         for ns in env.noise_sources:
             dist = env.distance_grid(ns.x, ns.y)
             pl = self._path_loss(dist, ns.frequency_mhz)
+
+            # Add obstacle attenuation for noise sources too
+            obs_att = env.obstacle_attenuation_grid(ns.x, ns.y)
+            pl = pl + obs_att
+
             power = ns.power_dbm - pl  # received interference dBm
             interf_mw += 10.0 ** (power / 10.0)
 
@@ -113,14 +123,7 @@ class Simulation:
     def coverage_stats(
         self, result: SimulationResult, sensitivity_dbm: float = -137.0
     ) -> dict:
-        """Return basic coverage statistics.
-
-        Parameters
-        ----------
-        result : SimulationResult
-        sensitivity_dbm : float
-            Minimum RSSI to consider a point covered.
-        """
+        """Return basic coverage statistics."""
         total = result.best_rssi.size
         covered = int(np.sum(result.best_rssi >= sensitivity_dbm))
         return {

@@ -15,8 +15,8 @@ A Python toolkit for simulating LPWAN (Low-Power Wide-Area Network) wireless env
 
 ```bash
 # Clone and install in editable mode
-git clone https://github.com/youruser/lpwan-simulator.git
-cd lpwan-simulator
+git clone https://github.com/boz011/sub-Ghz-heat-map.git
+cd sub-Ghz-heat-map
 pip install -e .
 ```
 

@@ -1,4 +1,4 @@
-// LPWAN Simulator — comprehensive rewrite
+﻿// LPWAN Simulator — comprehensive rewrite
 "use strict";
 
 const canvas = document.getElementById('grid-canvas');
@@ -16,9 +16,12 @@ let heatmapData = null;
 let propToggle = false;
 
 let zoom = 1.0;
-const MIN_ZOOM = 0.25, MAX_ZOOM = 4.0, ZOOM_STEP = 0.1;
+const MIN_ZOOM = 0.25, MAX_ZOOM = 10.0;
 
-let gridCfg = { width_km: 5, height_km: 5, resolution_m: 50 };
+let gridCfg = { width_km: 1, height_km: 1, resolution_m: 10 };
+
+let showHalow = true, showLorawan = true, showNbiot = true, showInterference = true, showObstacleAtt = true;
+let shadowFading = true, multipathFading = false;
 
 let idCounter = 0;
 function nextId(prefix) { return prefix + '_' + (++idCounter); }
@@ -51,6 +54,7 @@ const DEVICE_COLORS = {
     power_meter:'#ff3333',
 };
 const OBS_COLORS = { wall:'#666666', house:'#8B4513', water:'#0066cc', forest:'#228B22', water_tower:'#4682B4' };
+const OBS_ICONS = { wall:'🧱', house:'🏠', water:'💧', forest:'🌲', water_tower:'🗼' };
 
 // Obstacle types that can be placed
 const OBSTACLE_TYPES = ['wall','house','water','forest','water_tower'];
@@ -58,6 +62,19 @@ const OBSTACLE_TYPES = ['wall','house','water','forest','water_tower'];
 // ═══════════════════════════════════════════════════════════════════════
 // Mouse state machine
 // ═══════════════════════════════════════════════════════════════════════
+// Heatmap cache
+let heatmapCache = null;  // offscreen canvas
+let heatmapCacheDirty = true;
+
+// RAF throttle
+let redrawPending = false;
+function requestRedraw() {
+    if (!redrawPending) {
+        redrawPending = true;
+        requestAnimationFrame(() => { redrawPending = false; redraw(); });
+    }
+}
+
 let mouseState = 'idle';
 let dragTarget = null;
 let resizeTarget = null;
@@ -130,16 +147,30 @@ document.querySelectorAll('.config-toggle').forEach(t => {
 // ═══════════════════════════════════════════════════════════════════════
 // Canvas sizing
 // ═══════════════════════════════════════════════════════════════════════
+// Grid opacity (0-1), controlled by slider
+let gridOpacity = 0.8;
+
 function setupCanvas() {
     const dpr = window.devicePixelRatio || 1;
-    const baseW = gridCfg.width_km * 120;
-    const baseH = gridCfg.height_km * 120;
+    // At zoom=1, fill the viewport so 1km grid uses full screen
+    const viewW = container.clientWidth || 800;
+    const viewH = container.clientHeight || 600;
+    const pxPerKm = Math.min(viewW / gridCfg.width_km, viewH / gridCfg.height_km);
+    const baseW = gridCfg.width_km * pxPerKm;
+    const baseH = gridCfg.height_km * pxPerKm;
+    // Store for coordinate conversions
+    window._pxPerKm = pxPerKm;
     const w = baseW * zoom;
     const h = baseH * zoom;
     canvas.width = w * dpr;
     canvas.height = h * dpr;
     canvas.style.width = w + 'px';
     canvas.style.height = h + 'px';
+    // Center grid in viewport when smaller than container
+    const ml = Math.max(0, (viewW - w) / 2);
+    const mt = Math.max(0, (viewH - h) / 2);
+    canvas.style.marginLeft = ml + 'px';
+    canvas.style.marginTop = mt + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     redraw();
 }
@@ -148,18 +179,19 @@ function setupCanvas() {
 // Coordinate conversions — Y increases DOWNWARD (screen-style)
 // Top-left = (0,0), bottom-right = (width_km, height_km)
 // ═══════════════════════════════════════════════════════════════════════
+function ppk() { return window._pxPerKm || 120; }
 function screenToKm(clientX, clientY) {
     const r = canvas.getBoundingClientRect();
     const px = clientX - r.left;
     const py = clientY - r.top;
-    return { x: px / (120 * zoom), y: py / (120 * zoom) };
+    return { x: px / (ppk() * zoom), y: py / (ppk() * zoom) };
 }
 function screenToPx(clientX, clientY) {
     const r = canvas.getBoundingClientRect();
     return { x: clientX - r.left, y: clientY - r.top };
 }
 function kmToPx(xKm, yKm) {
-    return { x: xKm * 120 * zoom, y: yKm * 120 * zoom };
+    return { x: xKm * ppk() * zoom, y: yKm * ppk() * zoom };
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -230,15 +262,23 @@ document.getElementById('measure-tool').addEventListener('click', () => {
 // ═══════════════════════════════════════════════════════════════════════
 // Grid controls
 // ═══════════════════════════════════════════════════════════════════════
-document.getElementById('grid-width').addEventListener('change', e => { gridCfg.width_km = parseInt(e.target.value)||5; setupCanvas(); });
-document.getElementById('grid-height').addEventListener('change', e => { gridCfg.height_km = parseInt(e.target.value)||5; setupCanvas(); });
-document.getElementById('resolution').addEventListener('change', e => { gridCfg.resolution_m = parseFloat(e.target.value)||50; });
+document.getElementById('grid-width').addEventListener('change', e => { gridCfg.width_km = parseInt(e.target.value)||1; setupCanvas(); });
+document.getElementById('grid-height').addEventListener('change', e => { gridCfg.height_km = parseInt(e.target.value)||1; setupCanvas(); });
+document.getElementById('resolution').addEventListener('change', e => { gridCfg.resolution_m = parseFloat(e.target.value)||10; });
 
 container.addEventListener('wheel', e => {
     e.preventDefault();
-    zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom + (e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP)));
+    if (e.deltaY > 0) zoom /= 1.1; else zoom *= 1.1;
+    zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
     document.getElementById('zoom-level').textContent = Math.round(zoom*100)+'%';
     setupCanvas();
+    if (mapEnabled && leafletMap) {
+        // Map zoom: base zoom at zoom=1, increase proportionally
+        const baseZoom = leafletMap._baseZoom || leafletMap.getZoom();
+        if (!leafletMap._baseZoom) leafletMap._baseZoom = leafletMap.getZoom();
+        const newMapZoom = leafletMap._baseZoom + Math.log2(zoom);
+        leafletMap.setZoom(Math.max(1, Math.min(20, newMapZoom)), { animate: false });
+    }
 }, { passive: false });
 
 document.getElementById('toggle-prop').addEventListener('click', () => {
@@ -293,7 +333,7 @@ function obstacleAtScreen(cx, cy) {
     for (let i = obstacles.length - 1; i >= 0; i--) {
         const o = obstacles[i];
         const tl = kmToPx(o.position.x, o.position.y);
-        const w = o.width_km * 120 * zoom, h = o.height_km * 120 * zoom;
+        const w = o.width_km * ppk() * zoom, h = o.height_km * ppk() * zoom;
         if (cx >= tl.x && cx <= tl.x + w && cy >= tl.y && cy <= tl.y + h) return o;
     }
     return null;
@@ -359,7 +399,7 @@ canvas.addEventListener('mousedown', e => {
 
     if (mouseState === 'measuring') {
         // Snap threshold scales with zoom: 15px on screen
-        const snapThreshKm = 15 / (120 * zoom);
+        const snapThreshKm = 15 / (ppk() * zoom);
         const snapDev = nearestDevice(km, snapThreshKm);
         const snapObs = nearestObstacleSnapPoint(km, snapThreshKm);
         // Pick closest of device vs obstacle snap
@@ -398,11 +438,11 @@ canvas.addEventListener('mousedown', e => {
 
     if (selectedType && OBSTACLE_TYPES.includes(selectedType)) {
         mouseState = 'drawing-obs';
-        obsDrawStart = km;
+        obsDrawStart = { x: clampX(km.x), y: clampY(km.y) };
         tempObs = {
             id: nextId(selectedType),
             type: selectedType,
-            position: { x: km.x, y: km.y },
+            position: { x: clampX(km.x), y: clampY(km.y) },
             width_km: 0, height_km: 0,
             material: selectedType === 'wall' ? document.getElementById('wall-mat').value : selectedType,
         };
@@ -433,14 +473,14 @@ canvas.addEventListener('mousemove', e => {
             dragTarget.position.x = clampX(km.x - off.x);
             dragTarget.position.y = clampY(km.y - off.y);
         }
-        redraw();
+        requestRedraw();
         return;
     }
 
     if (mouseState === 'resizing' && resizeTarget) {
         resizeTarget.width_km = Math.max(0.05, km.x - resizeTarget.position.x);
         resizeTarget.height_km = Math.max(0.05, km.y - resizeTarget.position.y);
-        redraw();
+        requestRedraw();
         return;
     }
 
@@ -449,8 +489,20 @@ canvas.addEventListener('mousemove', e => {
         tempObs.position.y = Math.min(obsDrawStart.y, km.y);
         tempObs.width_km = Math.abs(km.x - obsDrawStart.x);
         tempObs.height_km = Math.abs(km.y - obsDrawStart.y);
-        redraw();
+        requestRedraw();
         return;
+    }
+
+    // Show RSSI at cursor position when simulation is active
+    if (heatmapData && heatmapData.rssi_grid && mouseState === 'idle') {
+        const { rssi_grid, grid_shape } = heatmapData;
+        const [rows, cols] = grid_shape;
+        const row = Math.floor(km.y * 1000 / gridCfg.resolution_m);
+        const col = Math.floor(km.x * 1000 / gridCfg.resolution_m);
+        if (row >= 0 && row < rows && col >= 0 && col < cols) {
+            const rssi = rssi_grid[row][col];
+            statusEl.textContent = `RSSI: ${rssi.toFixed(1)} dBm  |  Position: (${(km.x).toFixed(3)}km, ${(km.y).toFixed(3)}km)`;
+        }
     }
 });
 
@@ -464,23 +516,29 @@ canvas.addEventListener('mouseup', e => {
         updateCounts();
         statusEl.textContent = `Placed ${dev.label} — click to place more, Esc to deselect`;
         redraw();
+        if (simActive) runSimulation();
     }
 
     if (mouseState === 'drawing-obs' && tempObs) {
-        if (tempObs.width_km > 0.03 && tempObs.height_km > 0.03) {
+        if (tempObs.width_km > 0.005 && tempObs.height_km > 0.005) {
             obstacles.push(tempObs);
             updateCounts();
             statusEl.textContent = `Placed ${tempObs.type} — drag to draw more, Esc to deselect`;
         }
         tempObs = null; obsDrawStart = null;
         redraw();
+        if (simActive) runSimulation();
     }
 
     if (mouseState === 'dragging') {
         if (dragTarget) delete dragTarget._dragOff;
         statusEl.textContent = 'Moved';
+        if (simActive) runSimulation();
     }
-    if (mouseState === 'resizing') statusEl.textContent = 'Resized';
+    if (mouseState === 'resizing') {
+        statusEl.textContent = 'Resized';
+        if (simActive) runSimulation();
+    }
 
     if (mouseState !== 'measuring') mouseState = 'idle';
     dragTarget = null; resizeTarget = null; mouseDownPos = null; didMove = false;
@@ -498,6 +556,7 @@ canvas.addEventListener('contextmenu', e => {
         updateCounts();
         statusEl.textContent = `Removed ${dev.label}`;
         redraw();
+        if (simActive) runSimulation();
         return;
     }
 
@@ -508,6 +567,7 @@ canvas.addEventListener('contextmenu', e => {
         updateCounts();
         statusEl.textContent = `Removed ${obs.type}`;
         redraw();
+        if (simActive) runSimulation();
         return;
     }
 
@@ -538,7 +598,19 @@ function formatDistance(meters) {
 let simActive = false;
 
 async function runSimulation() {
-    if (devices.length === 0) { statusEl.textContent = 'Place devices first!'; return; }
+    const filteredDevices = devices.filter(d => {
+        if (d.type.startsWith('halow') && !showHalow) return false;
+        if (d.type.startsWith('lorawan') && !showLorawan) return false;
+        if (d.type.startsWith('nbiot') && !showNbiot) return false;
+        if (d.type === 'power_meter' && !showInterference) return false;
+        return true;
+    });
+    const filteredObstacles = showObstacleAtt ? obstacles : [];
+    if (filteredDevices.length === 0) {
+        heatmapData = null; heatmapCacheDirty = true; redraw();
+        statusEl.textContent = 'No visible devices for simulation';
+        return;
+    }
     statusEl.textContent = 'Running simulation...';
     try {
         const resp = await fetch('/api/simulate', {
@@ -548,13 +620,17 @@ async function runSimulation() {
                 width_km: gridCfg.width_km,
                 height_km: gridCfg.height_km,
                 resolution_m: gridCfg.resolution_m,
-                devices: devices,
-                obstacles: obstacles,
+                devices: filteredDevices,
+                obstacles: filteredObstacles,
+                environment_type: document.getElementById('env-type').value,
+                shadow_fading: shadowFading,
+                multipath_fading: multipathFading,
             }),
         });
         const data = await resp.json();
         if (data.ok) {
             heatmapData = data.result;
+            heatmapCacheDirty = true;
             updateStats(data.result.stats);
             updatePerTechStats(data.result.per_tech_stats || null);
             redraw();
@@ -580,6 +656,8 @@ document.getElementById('run-sim').addEventListener('click', async () => {
         btn.textContent = '▶ Run Simulation';
         btn.style.background = '';
         heatmapData = null;
+        heatmapCacheDirty = true;
+        heatmapCache = null;
         updateStats(null);
         updatePerTechStats(null);
         redraw();
@@ -589,7 +667,7 @@ document.getElementById('run-sim').addEventListener('click', async () => {
 
 document.getElementById('clear-all').addEventListener('click', () => {
     if (!confirm('Clear everything?')) return;
-    devices = []; obstacles = []; heatmapData = null;
+    devices = []; obstacles = []; heatmapData = null; heatmapCache = null; heatmapCacheDirty = true;
     measureStart = measureEnd = null;
     measuringActive = false;
     simActive = false;
@@ -626,86 +704,283 @@ function redraw() {
 }
 
 function drawGrid() {
-    ctx.strokeStyle = '#333'; ctx.lineWidth = 0.5;
+    ctx.globalAlpha = gridOpacity;
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1;
     // X-axis labels (left to right)
     for (let km = 0; km <= gridCfg.width_km; km++) {
-        const x = km * 120 * zoom;
+        const x = km * ppk() * zoom;
         ctx.beginPath(); ctx.moveTo(x, 0);
-        ctx.lineTo(x, gridCfg.height_km * 120 * zoom); ctx.stroke();
-        ctx.fillStyle = '#555'; ctx.font = `${Math.max(9, 10*zoom)}px monospace`;
+        ctx.lineTo(x, gridCfg.height_km * ppk() * zoom); ctx.stroke();
+        ctx.fillStyle = '#fff'; ctx.font = `${Math.max(9, 10*zoom)}px monospace`;
         ctx.fillText(km + 'km', x + 2, 12*zoom);
     }
     // Y-axis labels — 0km at top, increasing downward
     for (let km = 0; km <= gridCfg.height_km; km++) {
-        const y = km * 120 * zoom;
+        const y = km * ppk() * zoom;
         ctx.beginPath(); ctx.moveTo(0, y);
-        ctx.lineTo(gridCfg.width_km * 120 * zoom, y); ctx.stroke();
-        ctx.fillStyle = '#555'; ctx.font = `${Math.max(9, 10*zoom)}px monospace`;
+        ctx.lineTo(gridCfg.width_km * ppk() * zoom, y); ctx.stroke();
+        ctx.fillStyle = '#fff'; ctx.font = `${Math.max(9, 10*zoom)}px monospace`;
         ctx.fillText(km + 'km', 2, y - 3);
+    }
+    ctx.globalAlpha = 1;
+}
+
+function rebuildHeatmapCache() {
+    const { rssi_grid, interference_grid, grid_shape } = heatmapData;
+    const [rows, cols] = grid_shape;
+    const offscreen = document.createElement('canvas');
+    offscreen.width = cols;
+    offscreen.height = rows;
+    const offCtx = offscreen.getContext('2d');
+    const imgData = offCtx.createImageData(cols, rows);
+    const d = imgData.data;
+    for (let i = 0; i < rows; i++) {
+        for (let j = 0; j < cols; j++) {
+            const idx = (i * cols + j) * 4;
+            const rssi = rssi_grid[i][j];
+            const c = rssiColorRGBA(rssi);
+            d[idx] = c[0]; d[idx+1] = c[1]; d[idx+2] = c[2]; d[idx+3] = c[3];
+        }
+    }
+    offCtx.putImageData(imgData, 0, 0);
+    // Interference overlay pass (composite on top) — only when toggle is ON
+    if (interference_grid && showInterference) {
+        const offscreen2 = document.createElement('canvas');
+        offscreen2.width = cols; offscreen2.height = rows;
+        const offCtx2 = offscreen2.getContext('2d');
+        const imgData2 = offCtx2.createImageData(cols, rows);
+        const d2 = imgData2.data;
+        for (let i = 0; i < rows; i++) {
+            for (let j = 0; j < cols; j++) {
+                const idx = (i * cols + j) * 4;
+                const interf = interference_grid[i][j];
+                if (interf > -120) {
+                    const alpha = Math.min(0.6, Math.max(0.05, (interf + 120) / 80));
+                    d2[idx] = 160; d2[idx+1] = 0; d2[idx+2] = 0; d2[idx+3] = Math.round(alpha * 255);
+                }
+            }
+        }
+        offCtx2.putImageData(imgData2, 0, 0);
+        offCtx.drawImage(offscreen2, 0, 0);
+    }
+    heatmapCache = offscreen;
+    heatmapCacheDirty = false;
+}
+
+// Detect dominant tech from placed devices
+function getDominantTech() {
+    // Only count techs that are toggled ON and have devices placed
+    const techs = new Set();
+    for (const d of devices) {
+        if (d.type.startsWith('halow') && showHalow) techs.add('halow');
+        else if (d.type.startsWith('lorawan') && showLorawan) techs.add('lorawan');
+        else if (d.type.startsWith('nbiot') && showNbiot) techs.add('nbiot');
+    }
+    if (techs.size === 1) return [...techs][0];
+    if (techs.size === 0) return 'none';
+    return 'mixed';
+}
+
+function rssiColorRGBA(rssi) {
+    const isMap = mapEnabled;
+    // High alpha so colors are vivid on dark background
+    const mapScale = isMap ? 0.6 : 1.0;
+    const aExc  = Math.round(0.85 * mapScale * 255);
+    const aGood = Math.round(0.70 * mapScale * 255);
+    const aFair = Math.round(0.55 * mapScale * 255);
+    const aPoor = Math.round(0.40 * mapScale * 255);
+    const tech = getDominantTech();
+
+    if (tech === 'halow') {
+        // Bright cyan → teal → blue-teal → deep navy
+        if (rssi > -65) return [0,229,229, aExc];     // bright cyan
+        if (rssi > -75) return [0,179,179, aGood];    // teal
+        if (rssi > -85) return [0,128,160, aFair];    // blue-teal
+        return [0,60,120, aPoor];                      // deep blue
+    } else if (tech === 'lorawan') {
+        // Bright magenta → purple → dark purple → deep purple
+        if (rssi > -100) return [255,68,255, aExc];
+        if (rssi > -120) return [180,0,180, aGood];
+        if (rssi > -130) return [100,0,140, aFair];
+        return [50,0,80, aPoor];
+    } else if (tech === 'nbiot') {
+        // Bright orange → medium orange → pale → faded
+        if (rssi > -90) return [255,187,51, aExc];
+        if (rssi > -110) return [221,136,0, aGood];
+        if (rssi > -120) return [180,130,30, aFair];
+        return [130,100,50, aPoor];
+    } else {
+        // Mixed: use all tech colors based on RSSI range
+        if (rssi > -65) return [0,229,229, aExc];
+        if (rssi > -85) return [0,179,179, aGood];
+        if (rssi > -100) return [180,0,180, aFair];
+        if (rssi > -120) return [221,136,0, aPoor];
+        return [255,50,50, Math.round(0.30 * mapScale * 255)];
     }
 }
 
 function drawHeatmap() {
-    const { rssi_grid, interference_grid, grid_shape } = heatmapData;
-    const [rows, cols] = grid_shape;
-    const cw = (gridCfg.width_km * 120 * zoom) / cols;
-    const ch = (gridCfg.height_km * 120 * zoom) / rows;
-    // Grid row 0 = top of map (Y=0), row N = bottom (Y=height_km)
-    for (let i = 0; i < rows; i++) {
-        for (let j = 0; j < cols; j++) {
-            const rssi = rssi_grid[i][j];
-            ctx.fillStyle = rssiColor(rssi);
-            ctx.fillRect(j * cw, i * ch, cw, ch);
-        }
-    }
-    // Draw interference overlay in dark orange
-    if (interference_grid) {
-        for (let i = 0; i < rows; i++) {
-            for (let j = 0; j < cols; j++) {
-                const interf = interference_grid[i][j];
-                if (interf > -120) {
-                    // Stronger interference = more opaque
-                    const alpha = Math.min(0.6, Math.max(0.05, (interf + 120) / 80));
-                    ctx.fillStyle = `rgba(0,0,160,${alpha.toFixed(2)})`;
-                    ctx.fillRect(j * cw, i * ch, cw, ch);
-                }
-            }
-        }
-    }
+    if (heatmapCacheDirty || !heatmapCache) rebuildHeatmapCache();
+    const w = gridCfg.width_km * ppk() * zoom;
+    const h = gridCfg.height_km * ppk() * zoom;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(heatmapCache, 0, 0, w, h);
+    ctx.imageSmoothingEnabled = true;
 }
 
 function rssiColor(rssi) {
-    const a = mapEnabled ? 0.25 : 0.45;
-    const a2 = mapEnabled ? 0.2 : 0.4;
-    const a3 = mapEnabled ? 0.15 : 0.35;
-    const a4 = mapEnabled ? 0.1 : 0.3;
-    if (rssi > -65) return `rgba(0,255,0,${a})`;
-    if (rssi > -85) return `rgba(136,255,0,${a2})`;
-    if (rssi > -100) return `rgba(255,255,0,${a3})`;
-    if (rssi > -120) return `rgba(255,136,0,${a4})`;
-    return `rgba(255,0,0,${mapEnabled ? 0.08 : 0.2})`;
+    const c = rssiColorRGBA(rssi);
+    return `rgba(${c[0]},${c[1]},${c[2]},${(c[3]/255).toFixed(2)})`;
 }
 
 function drawObstacles() { obstacles.forEach(o => drawOneObs(o, false)); }
 function drawOneObs(o, isTemp) {
-    // Y-down: position is top-left corner
     const tl = kmToPx(o.position.x, o.position.y);
-    const w = o.width_km * 120 * zoom, h = o.height_km * 120 * zoom;
-    ctx.globalAlpha = isTemp ? 0.5 : 0.7;
+    const w = o.width_km * ppk() * zoom, h = o.height_km * ppk() * zoom;
+    ctx.globalAlpha = isTemp ? 0.5 : 1;
+
+    // Light semi-transparent fill so bounding area is visible
     ctx.fillStyle = OBS_COLORS[o.type] || '#888';
+    ctx.globalAlpha = isTemp ? 0.2 : 0.15;
     ctx.fillRect(tl.x, tl.y, w, h);
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = isTemp ? 0.5 : 1;
+
+    // White border outline
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
     ctx.strokeRect(tl.x, tl.y, w, h);
+
+    // Draw icons based on type
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (o.type === 'forest') {
+        _drawForestTrees(tl.x, tl.y, w, h);
+    } else if (o.type === 'water') {
+        _drawPond(tl.x, tl.y, w, h);
+    } else if (o.type === 'house') {
+        _drawHouse(tl.x, tl.y, w, h);
+    } else if (o.type === 'wall') {
+        _drawWall(tl.x, tl.y, w, h);
+    } else if (o.type === 'water_tower') {
+        _drawWaterTower(tl.x, tl.y, w, h);
+    }
+    ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+
+    // Label
     ctx.fillStyle = '#fff'; ctx.font = `${Math.max(9, 10*zoom)}px sans-serif`;
     const typeNames = { wall:'Wall', house:'House', water:'Water Pond', forest:'Forest', water_tower:'Water Tower' };
     const lbl = (typeNames[o.type] || o.type) + (o.type === 'wall' ? ' (' + o.material + ')' : '');
     ctx.fillText(lbl, tl.x + 4, tl.y + 13*zoom);
+    ctx.globalAlpha = 1;
     if (!isTemp) {
-        // Resize handle at bottom-right
         ctx.fillStyle = '#0088ff';
         ctx.fillRect(tl.x + w - 7, tl.y + h - 7, 7, 7);
     }
+}
+
+// ── Obstacle icon drawing helpers ──
+function _drawForestTrees(x, y, w, h) {
+    const treeSize = Math.max(8, Math.min(20, Math.min(w, h) / 4));
+    const padding = treeSize * 0.6;
+    const cols = Math.max(1, Math.floor((w - padding) / (treeSize * 1.2)));
+    const rows = Math.max(1, Math.floor((h - padding) / (treeSize * 1.4)));
+    const count = Math.min(cols * rows, 25);
+    const xStep = (w - padding * 2) / Math.max(1, cols - 1);
+    const yStep = (h - padding * 2) / Math.max(1, rows - 1);
+    ctx.fillStyle = '#228B22';
+    for (let r = 0; r < rows && r * cols < count; r++) {
+        for (let c = 0; c < cols && r * cols + c < count; c++) {
+            const tx = x + padding + c * xStep + (r % 2 ? xStep * 0.3 : 0);
+            const ty = y + padding + r * yStep;
+            // Triangle tree
+            ctx.beginPath();
+            ctx.moveTo(tx, ty - treeSize * 0.6);
+            ctx.lineTo(tx + treeSize * 0.4, ty + treeSize * 0.3);
+            ctx.lineTo(tx - treeSize * 0.4, ty + treeSize * 0.3);
+            ctx.closePath();
+            ctx.fill();
+            // Trunk
+            ctx.fillStyle = '#8B4513';
+            ctx.fillRect(tx - treeSize * 0.08, ty + treeSize * 0.3, treeSize * 0.16, treeSize * 0.2);
+            ctx.fillStyle = '#228B22';
+        }
+    }
+}
+
+function _drawPond(x, y, w, h) {
+    const cx = x + w / 2, cy = y + h / 2;
+    const rx = w * 0.4, ry = h * 0.35;
+    // Water fill
+    ctx.fillStyle = 'rgba(0, 102, 204, 0.5)';
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Shore outline
+    ctx.strokeStyle = '#004488'; ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // Ripple lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1;
+    for (let i = -1; i <= 1; i++) {
+        ctx.beginPath();
+        ctx.ellipse(cx, cy + i * ry * 0.3, rx * 0.5, ry * 0.12, 0, 0, Math.PI);
+        ctx.stroke();
+    }
+}
+
+function _drawHouse(x, y, w, h) {
+    const cx = x + w / 2, cy = y + h / 2;
+    const hw = Math.min(w, h) * 0.35;
+    // House body
+    ctx.fillStyle = '#8B4513';
+    ctx.fillRect(cx - hw * 0.8, cy - hw * 0.2, hw * 1.6, hw * 1.0);
+    // Roof
+    ctx.fillStyle = '#A52A2A';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - hw * 0.8);
+    ctx.lineTo(cx + hw, cy - hw * 0.2);
+    ctx.lineTo(cx - hw, cy - hw * 0.2);
+    ctx.closePath();
+    ctx.fill();
+    // Door
+    ctx.fillStyle = '#DEB887';
+    ctx.fillRect(cx - hw * 0.15, cy + hw * 0.2, hw * 0.3, hw * 0.6);
+    // Window
+    ctx.fillStyle = '#87CEEB';
+    ctx.fillRect(cx + hw * 0.25, cy, hw * 0.3, hw * 0.25);
+    ctx.fillRect(cx - hw * 0.55, cy, hw * 0.3, hw * 0.25);
+}
+
+function _drawWall(x, y, w, h) {
+    // Brick pattern
+    const bw = Math.max(6, Math.min(16, w / 6));
+    const bh = bw * 0.5;
+    ctx.fillStyle = '#999';
+    let row = 0;
+    for (let by = y + 2; by < y + h - 2; by += bh + 1) {
+        const offset = (row % 2) ? bw * 0.5 : 0;
+        for (let bx = x + 2 + offset; bx < x + w - 2; bx += bw + 1) {
+            const bWidth = Math.min(bw, x + w - 2 - bx);
+            if (bWidth > 2) {
+                ctx.fillRect(bx, by, bWidth, bh);
+            }
+        }
+        row++;
+    }
+}
+
+function _drawWaterTower(x, y, w, h) {
+    const cx = x + w / 2, cy = y + h / 2;
+    const sz = Math.min(w, h) * 0.3;
+    // Legs
+    ctx.strokeStyle = '#888'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(cx - sz * 0.6, cy + sz * 1.2); ctx.lineTo(cx - sz * 0.3, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx + sz * 0.6, cy + sz * 1.2); ctx.lineTo(cx + sz * 0.3, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, cy + sz * 1.2); ctx.lineTo(cx, cy); ctx.stroke();
+    // Tank
+    ctx.fillStyle = '#4682B4';
+    ctx.beginPath();
+    ctx.ellipse(cx, cy - sz * 0.3, sz * 0.6, sz * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1;
+    ctx.stroke();
 }
 
 // Propagation colors per technology
@@ -738,7 +1013,7 @@ function drawPropCircles() {
         ctx.lineWidth = 1.2;
         for (let r = 0.5; r <= rangeKm; r += 0.5) {
             ctx.strokeStyle = colorBase + '0.18)';
-            ctx.beginPath(); ctx.arc(p.x, p.y, r * 120 * zoom, 0, Math.PI*2); ctx.stroke();
+            ctx.beginPath(); ctx.arc(p.x, p.y, r * ppk() * zoom, 0, Math.PI*2); ctx.stroke();
         }
     });
 }
@@ -766,23 +1041,148 @@ function drawDevices() {
         ctx.fillStyle = '#fff'; ctx.font = `${fontSize}px sans-serif`;
         ctx.fillText(d.label, p.x + sz, p.y + 4);
     });
+    // Draw RSSI link labels between gateway/AP and endpoints of same tech
+    if (heatmapData && heatmapData.rssi_grid) drawRssiLinks();
+}
+
+// Compute RSSI from a gateway/AP to an endpoint using log-distance path loss
+function computeLinkRssi(gw, ep) {
+    const dx = (gw.position.x - ep.position.x) * 1000; // meters
+    const dy = (gw.position.y - ep.position.y) * 1000;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist < 1) return 0; // co-located
+    
+    // Get frequency
+    let freqMhz = 903; // default HaLow
+    if (gw.type.startsWith('lorawan')) {
+        freqMhz = gw.region === 'EU868' ? 868 : 915;
+    } else if (gw.type.startsWith('nbiot')) {
+        freqMhz = 869;
+    } else if (gw.type.startsWith('halow')) {
+        freqMhz = 902 + (gw.channel || 2) * 0.5;
+    }
+    
+    // Path loss exponent from environment selector
+    const envSel = document.getElementById('env-type');
+    const envMap = { urban: 2.7, suburban: 2.4, rural: 2.0 };
+    const n = envMap[envSel ? envSel.value : 'urban'] || 2.7;
+    
+    // FSPL at d0=1m: 20*log10(d0_km) + 20*log10(f) + 32.44
+    const d0 = 1.0;
+    const pl0 = 20 * Math.log10(d0/1000) + 20 * Math.log10(freqMhz) + 32.44;
+    const pl = pl0 + 10 * n * Math.log10(dist / d0);
+    
+    // TX power + antenna gain
+    const txPower = gw.tx_power_dbm || 30;
+    const gain = gw.antenna_gain_dbi || 3;
+    const heightGain = (gw.elevation_m && gw.elevation_m > 1) ? 6 * Math.log10(gw.elevation_m) / Math.log10(10) : 0;
+    
+    // Obstacle attenuation (approximate: check if any obstacle bbox intersects the link line)
+    let obsAtt = 0;
+    if (showObstacleAtt) {
+        for (const o of obstacles) {
+            const ox = o.position.x * 1000, oy = o.position.y * 1000;
+            const ow = o.width_km * 1000, oh = o.height_km * 1000;
+            if (_lineIntersectsRect(gw.position.x*1000, gw.position.y*1000, ep.position.x*1000, ep.position.y*1000, ox, oy, ow, oh)) {
+                const matAtt = {wood:4, glass:3, cement:12, metal:25, house:10, water:12, forest:8, water_tower:15};
+                obsAtt += matAtt[o.material] || matAtt[o.type] || 10;
+            }
+        }
+    }
+    
+    return txPower + gain + heightGain - pl - obsAtt;
+}
+
+// Simple line-rect intersection for link RSSI calculation
+function _lineIntersectsRect(x1,y1,x2,y2,rx,ry,rw,rh) {
+    // Parametric ray test against 4 edges
+    const dx = x2-x1, dy = y2-y1;
+    const edges = [
+        [rx,ry, rx+rw,ry], [rx+rw,ry, rx+rw,ry+rh],
+        [rx+rw,ry+rh, rx,ry+rh], [rx,ry+rh, rx,ry]
+    ];
+    for (const [ex1,ey1,ex2,ey2] of edges) {
+        const edx = ex2-ex1, edy = ey2-ey1;
+        const denom = dx*edy - dy*edx;
+        if (Math.abs(denom) < 1e-10) continue;
+        const t = ((ex1-x1)*edy - (ey1-y1)*edx) / denom;
+        const u = ((ex1-x1)*dy - (ey1-y1)*dx) / denom;
+        if (t > 0.01 && t < 0.99 && u >= 0 && u <= 1) return true;
+    }
+    return false;
+}
+
+function drawRssiLinks() {
+    const gateways = devices.filter(d => d.type.includes('gateway') || d.type.includes('ap') || d.type.includes('base'));
+    const endpoints = devices.filter(d => d.type.includes('endpoint'));
+    
+    function sameTech(a, b) {
+        const ta = a.type.split('_')[0], tb = b.type.split('_')[0];
+        return ta === tb;
+    }
+    
+    const linkFontSize = Math.max(9, 11 / zoom);
+    ctx.font = `bold ${linkFontSize}px monospace`;
+    
+    for (const gw of gateways) {
+        for (const ep of endpoints) {
+            if (!sameTech(gw, ep)) continue;
+            
+            // Compute RSSI analytically (gateway → endpoint)
+            const rssi = computeLinkRssi(gw, ep);
+            
+            const gp = kmToPx(gw.position.x, gw.position.y);
+            const ep_px = kmToPx(ep.position.x, ep.position.y);
+            
+            // Draw dashed link line
+            ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+            ctx.lineWidth = 1 / zoom;
+            ctx.setLineDash([3/zoom, 3/zoom]);
+            ctx.beginPath(); ctx.moveTo(gp.x, gp.y); ctx.lineTo(ep_px.x, ep_px.y); ctx.stroke();
+            ctx.setLineDash([]);
+            
+            // RSSI label at midpoint
+            const mx = (gp.x + ep_px.x) / 2;
+            const my = (gp.y + ep_px.y) / 2;
+            const rssiText = `${rssi.toFixed(1)} dBm`;
+            
+            // Background box
+            const tw = ctx.measureText(rssiText).width;
+            ctx.fillStyle = 'rgba(0,0,0,0.8)';
+            ctx.fillRect(mx - tw/2 - 3/zoom, my - 7/zoom, tw + 6/zoom, 14/zoom);
+            
+            // Color based on quality
+            if (rssi > -65) ctx.fillStyle = '#00ff88';
+            else if (rssi > -85) ctx.fillStyle = '#ffff00';
+            else if (rssi > -120) ctx.fillStyle = '#ff8800';
+            else ctx.fillStyle = '#ff4444';
+            
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(rssiText, mx, my);
+            ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+        }
+    }
 }
 
 function drawMeasure() {
     const s = kmToPx(measureStart.x, measureStart.y);
+    // Fixed screen-size dots: 3px regardless of zoom
+    const dotR = 3 / zoom;
     ctx.fillStyle = '#00ff00';
-    ctx.beginPath(); ctx.arc(s.x, s.y, 4*zoom, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(s.x, s.y, dotR, 0, Math.PI*2); ctx.fill();
     if (measureEnd) {
         const e = kmToPx(measureEnd.x, measureEnd.y);
-        ctx.strokeStyle = '#00ff00'; ctx.lineWidth = 2; ctx.setLineDash([5,5]);
+        ctx.strokeStyle = '#00ff00'; ctx.lineWidth = 1.5 / zoom; ctx.setLineDash([4/zoom, 4/zoom]);
         ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y); ctx.stroke();
         ctx.setLineDash([]);
-        ctx.beginPath(); ctx.arc(e.x, e.y, 4*zoom, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#ff4444';
+        ctx.beginPath(); ctx.arc(e.x, e.y, dotR, 0, Math.PI*2); ctx.fill();
         const dx = measureEnd.x - measureStart.x, dy = measureEnd.y - measureStart.y;
         const distM = Math.sqrt(dx*dx+dy*dy)*1000;
         const mx = (s.x+e.x)/2, my = (s.y+e.y)/2;
-        ctx.font = `bold ${12*zoom}px monospace`;
-        ctx.fillText(formatDistance(distM), mx+5, my-5);
+        ctx.fillStyle = '#fff';
+        ctx.font = `bold 12px monospace`;
+        ctx.fillText(formatDistance(distM), mx + 5/zoom, my - 5/zoom);
     }
 }
 
@@ -817,6 +1217,8 @@ function updatePerTechStats(pts) {
 }
 
 function updateCounts() {
+    // Invalidate heatmap cache when devices change (color palette depends on tech mix)
+    heatmapCacheDirty = true;
     const counts = {
         halow_ap: 0, halow_endpoint: 0,
         lorawan_gateway: 0, lorawan_endpoint: 0,
@@ -862,8 +1264,8 @@ function initLeafletMap() {
         keyboard: false,
         touchZoom: false,
     });
-    streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 });
-    satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 });
+    streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 20 });
+    satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20 });
     currentLayer = streetLayer;
     currentLayer.addTo(leafletMap);
 }
@@ -873,24 +1275,34 @@ function syncMapToGrid() {
     const lat = parseFloat(document.getElementById('map-lat').value) || 30.2672;
     const lng = parseFloat(document.getElementById('map-lng').value) || -97.7431;
 
-    const w = parseFloat(canvas.style.width);
-    const h = parseFloat(canvas.style.height);
-    mapContainer.style.width = w + 'px';
-    mapContainer.style.height = h + 'px';
+    // Map fills entire scrollable area (same as canvas)
+    const canvasW = parseFloat(canvas.style.width) || container.clientWidth;
+    const canvasH = parseFloat(canvas.style.height) || container.clientHeight;
+    mapContainer.style.width = canvasW + 'px';
+    mapContainer.style.height = canvasH + 'px';
+    mapContainer.style.left = canvas.style.marginLeft;
+    mapContainer.style.top = canvas.style.marginTop;
     leafletMap.invalidateSize();
 
-    const halfW = gridCfg.width_km / 2;
-    const halfH = gridCfg.height_km / 2;
-    const latPerKm = 1 / 111.0;
-    const lngPerKm = 1 / (111.0 * Math.cos(lat * Math.PI / 180));
+    // Always show 5km × 5km area centered on the requested lat/lng
+    const mapSizeKm = 5;
+    const halfW = mapSizeKm / 2;
+    const halfH = mapSizeKm / 2;
+    const latPerKm = 1 / 110.574;
+    const lngPerKm = 1 / (111.320 * Math.cos(lat * Math.PI / 180));
 
     const south = lat - halfH * latPerKm;
     const north = lat + halfH * latPerKm;
     const west = lng - halfW * lngPerKm;
     const east = lng + halfW * lngPerKm;
 
-    leafletMap.fitBounds([[south, west], [north, east]]);
-    setTimeout(() => leafletMap.invalidateSize(), 100);
+    leafletMap.fitBounds([[south, west], [north, east]], { animate: false, padding: [0, 0] });
+    // Store base zoom for proportional zooming
+    setTimeout(() => {
+        leafletMap.invalidateSize();
+        leafletMap.fitBounds([[south, west], [north, east]], { animate: false, padding: [0, 0] });
+        leafletMap._baseZoom = leafletMap.getZoom();
+    }, 200);
 }
 
 document.getElementById('toggle-map').addEventListener('click', () => {
@@ -929,6 +1341,29 @@ setupCanvas = function() {
     _origSetupCanvas();
     if (mapEnabled && leafletMap) syncMapToGrid();
 };
+
+// Grid opacity slider
+document.getElementById('grid-opacity').addEventListener('input', e => {
+    gridOpacity = parseInt(e.target.value) / 100;
+    redraw();
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Display toggle checkboxes
+// ═══════════════════════════════════════════════════════════════════════
+function onToggleChange() {
+    heatmapCacheDirty = true;
+    if (simActive) runSimulation();
+    else redraw();
+}
+document.getElementById('toggle-halow').addEventListener('change', e => { showHalow = e.target.checked; onToggleChange(); });
+document.getElementById('toggle-lorawan').addEventListener('change', e => { showLorawan = e.target.checked; onToggleChange(); });
+document.getElementById('toggle-nbiot').addEventListener('change', e => { showNbiot = e.target.checked; onToggleChange(); });
+document.getElementById('toggle-interference').addEventListener('change', e => { showInterference = e.target.checked; onToggleChange(); });
+document.getElementById('toggle-obstacles-att').addEventListener('change', e => { showObstacleAtt = e.target.checked; onToggleChange(); });
+document.getElementById('toggle-shadow-fading').addEventListener('change', e => { shadowFading = e.target.checked; onToggleChange(); });
+document.getElementById('toggle-multipath-fading').addEventListener('change', e => { multipathFading = e.target.checked; onToggleChange(); });
+document.getElementById('env-type').addEventListener('change', () => { if (simActive) runSimulation(); });
 
 // ═══════════════════════════════════════════════════════════════════════
 // Init

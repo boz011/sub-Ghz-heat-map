@@ -49,11 +49,17 @@ class Simulation:
         pathloss_model: str = "log-distance",
         pathloss_exponent: float = 2.7,
         noise_floor_dbm: float = -120.0,
+        shadow_fading_std: float = 0.0,
+        multipath_fading: bool = False,
+        noise_figure_db: float = 6.0,
     ) -> None:
         self.env = env
         self.pathloss_model = pathloss_model
         self.pathloss_exponent = pathloss_exponent
         self.noise_floor_dbm = noise_floor_dbm
+        self.shadow_fading_std = shadow_fading_std
+        self.multipath_fading = multipath_fading
+        self.noise_figure_db = noise_figure_db
 
     # ------------------------------------------------------------------
     def _path_loss(self, distance: np.ndarray, freq_mhz: float) -> np.ndarray:
@@ -79,6 +85,20 @@ class Simulation:
             pl = pl + obs_att
 
             rssi = tx.eirp_dbm - pl
+
+            # Shadow fading (log-normal)
+            if self.shadow_fading_std > 0:
+                fading = np.random.normal(0, self.shadow_fading_std, rssi.shape)
+                rssi = rssi + fading
+
+            # Multipath fading (Rayleigh)
+            if self.multipath_fading:
+                x_mp = np.random.normal(0, 1, rssi.shape)
+                y_mp = np.random.normal(0, 1, rssi.shape)
+                r = np.sqrt(x_mp**2 + y_mp**2) / np.sqrt(2)
+                fading_db = 20.0 * np.log10(np.clip(r, 0.01, None))
+                rssi = rssi + fading_db
+
             label = tx.label or f"tx_{idx}"
             result.rssi[label] = rssi
             rssi_stack.append(rssi)
@@ -108,7 +128,7 @@ class Simulation:
         # --- SNR per transmitter ---
         snr_stack: List[np.ndarray] = []
         for label, rssi in result.rssi.items():
-            snr = rssi - result.interference
+            snr = rssi - (result.interference + self.noise_figure_db)
             result.snr[label] = snr
             snr_stack.append(snr)
 

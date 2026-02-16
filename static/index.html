@@ -23,10 +23,10 @@
             display:flex; gap:8px; align-items:center; flex-wrap:wrap; flex-shrink:0;
         }
         #canvas-container {
-            flex:1; position:relative; overflow:auto; background:#1a1a1a;
+            flex:1; position:relative; overflow:scroll; background:#1a1a1a; min-height:0;
         }
         #map-container {
-            position:absolute; top:0; left:0; width:100%; height:100%; z-index:0; display:none;
+            position:absolute; top:0; left:0; z-index:0; display:none; pointer-events:none;
         }
         #grid-canvas { display:block; cursor:crosshair; position:relative; z-index:1; }
         #right-panel {
@@ -164,22 +164,57 @@
             <h3>🔧 Tools</h3>
             <button id="measure-tool" class="obstacle-btn">📏 Measure Distance</button>
         </div>
+
+        <div class="palette-section">
+            <h3>🎛 Display</h3>
+            <label style="display:block;font-size:12px;margin:4px 0;color:#e0e0e0;cursor:pointer">
+                <input type="checkbox" id="toggle-halow" checked> Show HaLow Coverage
+            </label>
+            <label style="display:block;font-size:12px;margin:4px 0;color:#e0e0e0;cursor:pointer">
+                <input type="checkbox" id="toggle-lorawan" checked> Show LoRaWAN Coverage
+            </label>
+            <label style="display:block;font-size:12px;margin:4px 0;color:#e0e0e0;cursor:pointer">
+                <input type="checkbox" id="toggle-nbiot" checked> Show NB-IoT Coverage
+            </label>
+            <label style="display:block;font-size:12px;margin:4px 0;color:#e0e0e0;cursor:pointer">
+                <input type="checkbox" id="toggle-interference" checked> Show Interference
+            </label>
+            <label style="display:block;font-size:12px;margin:4px 0;color:#e0e0e0;cursor:pointer">
+                <input type="checkbox" id="toggle-obstacles-att" checked> Obstacle Signal Loss
+            </label>
+            <label style="display:block;font-size:12px;margin:4px 0;color:#e0e0e0;cursor:pointer">
+                <input type="checkbox" id="toggle-shadow-fading" checked> Shadow Fading (σ=4dB)
+            </label>
+            <label style="display:block;font-size:12px;margin:4px 0;color:#e0e0e0;cursor:pointer">
+                <input type="checkbox" id="toggle-multipath-fading"> Multipath Fading (Rayleigh)
+            </label>
+        </div>
     </div>
 
     <div id="main-area">
         <div id="toolbar">
             <label>Grid:</label>
-            <input type="number" id="grid-width" value="5" min="1" max="50" step="1">
+            <input type="number" id="grid-width" value="1" min="1" max="50" step="1">
             <span>×</span>
-            <input type="number" id="grid-height" value="5" min="1" max="50" step="1">
+            <input type="number" id="grid-height" value="1" min="1" max="50" step="1">
             <label>km</label>
 
             <label style="margin-left:10px">Res:</label>
-            <input type="number" id="resolution" value="50" min="10" max="500" step="10">
+            <input type="number" id="resolution" value="10" min="10" max="500" step="10">
             <label>m</label>
+
+            <label style="margin-left:10px">Env:</label>
+            <select id="env-type">
+                <option value="urban" selected>Urban (n=2.7)</option>
+                <option value="rural">Rural (n=2.0)</option>
+                <option value="suburban">Suburban (n=2.4)</option>
+            </select>
 
             <label style="margin-left:10px">Zoom:</label>
             <span id="zoom-level" style="min-width:36px">100%</span>
+
+            <label style="margin-left:10px">Grid:</label>
+            <input type="range" id="grid-opacity" min="5" max="100" value="80" style="width:80px;vertical-align:middle">
 
             <button id="run-sim" style="margin-left:auto">▶ Run Simulation</button>
             <button id="toggle-prop">Propagation</button>
@@ -228,30 +263,30 @@
             <div class="legend-item"><div class="legend-color" style="background:#00e5e5"></div><span>Excellent (&gt;−65 dBm)</span></div>
             <div class="legend-item"><div class="legend-color" style="background:#00b3b3"></div><span>Good (−65 to −75)</span></div>
             <div class="legend-item"><div class="legend-color" style="background:#008080"></div><span>Fair (−75 to −85)</span></div>
-            <div class="legend-item"><div class="legend-color" style="background:#004d4d"></div><span>Poor (&lt;−85)</span></div>
+            <div class="legend-item"><div class="legend-color" style="background:rgb(0,50,80)"></div><span>Poor (&lt;−85)</span></div>
         </div>
         <div class="legend" style="margin-top:10px">
             <h3>📡 LoRaWAN Coverage</h3>
             <div class="legend-item"><div class="legend-color" style="background:#ff44ff"></div><span>Excellent (&gt;−100 dBm)</span></div>
-            <div class="legend-item"><div class="legend-color" style="background:#cc00cc"></div><span>Good (−100 to −120)</span></div>
-            <div class="legend-item"><div class="legend-color" style="background:#880088"></div><span>Fair (−120 to −130)</span></div>
-            <div class="legend-item"><div class="legend-color" style="background:#440044"></div><span>Poor (&lt;−130)</span></div>
+            <div class="legend-item"><div class="legend-color" style="background:rgb(180,0,180)"></div><span>Good (−100 to −120)</span></div>
+            <div class="legend-item"><div class="legend-color" style="background:rgb(100,0,100)"></div><span>Fair (−120 to −130)</span></div>
+            <div class="legend-item"><div class="legend-color" style="background:rgb(40,0,40)"></div><span>Poor (&lt;−130)</span></div>
         </div>
         <div class="legend" style="margin-top:10px">
             <h3>📶 NB-IoT Coverage</h3>
             <div class="legend-item"><div class="legend-color" style="background:#ffbb33"></div><span>Excellent (&gt;−90 dBm)</span></div>
             <div class="legend-item"><div class="legend-color" style="background:#dd8800"></div><span>Good (−90 to −110)</span></div>
-            <div class="legend-item"><div class="legend-color" style="background:#aa5500"></div><span>Fair (−110 to −120)</span></div>
-            <div class="legend-item"><div class="legend-color" style="background:#663300"></div><span>Poor (&lt;−120)</span></div>
+            <div class="legend-item"><div class="legend-color" style="background:rgb(170,130,30)"></div><span>Fair (−110 to −120)</span></div>
+            <div class="legend-item"><div class="legend-color" style="background:rgb(120,100,50)"></div><span>Poor (&lt;−120)</span></div>
         </div>
 
         <div class="legend" style="margin-top:12px">
             <h3>⚡ Interference</h3>
-            <div class="legend-item"><div class="legend-color" style="background:rgba(0,0,160,.6)"></div><span>Co-channel / cross-tech</span></div>
-            <div class="legend-item"><div class="legend-color" style="background:rgba(255,51,51,.5)"></div><span>Power Meter interferer</span></div>
+            <div class="legend-item"><div class="legend-color" style="background:rgb(160,0,0)"></div><span>Co-channel / cross-tech</span></div>
+            <div class="legend-item"><div class="legend-color" style="background:rgb(255,51,51)"></div><span>Power Meter interferer</span></div>
         </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=9"></script>
 </body>
 </html>

@@ -72,10 +72,37 @@ class SimConfig(BaseModel):
     resolution_m: float = 50.0
     devices: List[dict] = []
     obstacles: List[RectObstacle] = []
+    environment_type: str = "urban"
+    shadow_fading: bool = True
+    multipath_fading: bool = True
 
 # ============================================================================
 # Simulation engine
 # ============================================================================
+
+# ============================================================================
+# Per-technology receiver sensitivity and noise figure
+# ============================================================================
+TECH_SENSITIVITY = {
+    "halow": -95.0,
+    "lorawan": {
+        7: -123.0, 8: -126.0, 9: -129.0,
+        10: -132.0, 11: -134.5, 12: -137.0,
+    },
+    "nbiot": -125.0,
+}
+
+TECH_NOISE_FIGURE = {
+    "halow": 6.0,
+    "lorawan": 6.0,
+    "nbiot": 5.0,
+}
+
+ENV_PATH_LOSS_EXPONENT = {
+    "urban": 2.7,
+    "suburban": 2.4,
+    "rural": 2.0,
+}
 
 def rect_to_obstacle_segments(obs: RectObstacle) -> List[Obstacle]:
     x1 = obs.position.x * 1000
@@ -158,8 +185,54 @@ def _line_intersects_rect(x1, y1, x2, y2, rx, ry, rw, rh):
     return False
 
 
+def _ray_intersects_rect_vectorized(tx_x, tx_y, cell_xs, cell_ys, rx, ry, rw, rh):
+    """Vectorized: for each cell, check if ray from (tx_x,tx_y) to (cell_x,cell_y) intersects rect.
+    Returns boolean array of shape (N,)."""
+    N = len(cell_xs)
+    result = np.zeros(N, dtype=bool)
+    
+    # Parametric ray: P = tx + t*(cell - tx), t in [0,1]
+    dx = cell_xs - tx_x
+    dy = cell_ys - tx_y
+    
+    # Check each of 4 edges
+    # Left edge: x = rx
+    mask = np.abs(dx) > 1e-6
+    t_left = np.full(N, -1.0)
+    t_left[mask] = (rx - tx_x) / dx[mask]
+    y_at_left = tx_y + t_left * dy
+    hit_left = (t_left > 0.01) & (t_left < 0.99) & (y_at_left >= ry) & (y_at_left <= ry + rh)
+    
+    # Right edge: x = rx + rw  
+    t_right = np.full(N, -1.0)
+    t_right[mask] = (rx + rw - tx_x) / dx[mask]
+    y_at_right = tx_y + t_right * dy
+    hit_right = (t_right > 0.01) & (t_right < 0.99) & (y_at_right >= ry) & (y_at_right <= ry + rh)
+    
+    # Top edge: y = ry
+    mask2 = np.abs(dy) > 1e-6
+    t_top = np.full(N, -1.0)
+    t_top[mask2] = (ry - tx_y) / dy[mask2]
+    x_at_top = tx_x + t_top * dx
+    hit_top = (t_top > 0.01) & (t_top < 0.99) & (x_at_top >= rx) & (x_at_top <= rx + rw)
+    
+    # Bottom edge: y = ry + rh
+    t_bot = np.full(N, -1.0)
+    t_bot[mask2] = (ry + rh - tx_y) / dy[mask2]
+    x_at_bot = tx_x + t_bot * dx
+    hit_bot = (t_bot > 0.01) & (t_bot < 0.99) & (x_at_bot >= rx) & (x_at_bot <= rx + rw)
+    
+    result = hit_left | hit_right | hit_top | hit_bot
+    
+    # Also check if cell is inside the rect
+    inside = (cell_xs >= rx) & (cell_xs <= rx + rw) & (cell_ys >= ry) & (cell_ys <= ry + rh)
+    
+    return result, inside
+
+
 def _apply_obstacle_shadows(result, config, device_info):
-    """Post-process RSSI grid: subtract obstacle attenuation for shadowed cells."""
+    """Post-process RSSI grid: subtract obstacle attenuation for shadowed cells.
+    Vectorized with numpy for performance on large grids."""
     if not config.obstacles:
         return
     
@@ -175,6 +248,8 @@ def _apply_obstacle_shadows(result, config, device_info):
     if not tx_positions:
         return
     
+    tx_arr = np.array(tx_positions)  # shape (num_tx, 2)
+    
     # Build obstacle rectangles in meters
     obs_rects = []
     for obs in config.obstacles:
@@ -182,7 +257,6 @@ def _apply_obstacle_shadows(result, config, device_info):
         oy = obs.position.y * 1000
         ow = obs.width_km * 1000
         oh = obs.height_km * 1000
-        mat = obs.material
         if obs.type == "house":
             att = MATERIAL_DB.get("brick", 10.0)
         elif obs.type == "water":
@@ -192,46 +266,61 @@ def _apply_obstacle_shadows(result, config, device_info):
         elif obs.type == "water_tower":
             att = MATERIAL_DB.get("water_tower", 15.0)
         else:
-            att = MATERIAL_DB.get(mat, 10.0)
+            att = MATERIAL_DB.get(obs.material, 10.0)
         obs_rects.append((ox, oy, ow, oh, att))
     
-    # For each grid cell, find nearest transmitter, check obstacle intersection
-    attenuation_grid = np.zeros((rows, cols), dtype=np.float64)
+    # Build cell coordinate grids
+    cell_ys = np.arange(rows) * res_m + res_m / 2
+    cell_xs = np.arange(cols) * res_m + res_m / 2
+    cx_grid, cy_grid = np.meshgrid(cell_xs, cell_ys)
+    cx_flat = cx_grid.ravel()
+    cy_flat = cy_grid.ravel()
+    N = len(cx_flat)
     
-    for i in range(rows):
-        cell_y = i * res_m + res_m / 2
-        for j in range(cols):
-            cell_x = j * res_m + res_m / 2
-            
-            # Find nearest transmitter
-            best_tx = None
-            best_dist_sq = float('inf')
-            for tx_x, tx_y in tx_positions:
-                dsq = (cell_x - tx_x)**2 + (cell_y - tx_y)**2
-                if dsq < best_dist_sq:
-                    best_dist_sq = dsq
-                    best_tx = (tx_x, tx_y)
-            
-            if best_tx is None:
-                continue
-            
-            # Check each obstacle for line-of-sight intersection
-            total_att = 0.0
-            for ox, oy, ow, oh, att in obs_rects:
-                # Skip if cell is inside the obstacle
-                if ox <= cell_x <= ox + ow and oy <= cell_y <= oy + oh:
-                    total_att += att * 2  # inside obstacle = double attenuation
-                    continue
-                if _line_intersects_rect(best_tx[0], best_tx[1], cell_x, cell_y, ox, oy, ow, oh):
-                    total_att += att
-            
-            attenuation_grid[i, j] = total_att
+    # For EACH transmitter, compute its obstacle attenuation grid,
+    # then apply to that transmitter's per-label RSSI.
+    # Map TX positions to their labels
+    tx_label_map = {}  # (tx_x, tx_y) -> [label, ...]
+    for freq, bw, x_m, y_m, pwr, tech in device_info:
+        if tech == "power_meter":
+            continue
+        # Find matching label from config devices
+        for dev in config.devices:
+            dev_x = dev["position"]["x"] * 1000
+            dev_y = dev["position"]["y"] * 1000
+            if abs(dev_x - x_m) < 1 and abs(dev_y - y_m) < 1:
+                lbl = dev.get("label", "")
+                key = (x_m, y_m)
+                if key not in tx_label_map:
+                    tx_label_map[key] = []
+                tx_label_map[key].append(lbl)
+                break
     
-    # Apply attenuation
-    result.best_rssi -= attenuation_grid
-    # Also apply to per-transmitter RSSI
-    for key in result.rssi:
-        result.rssi[key] -= attenuation_grid
+    # Compute per-TX attenuation and apply to per-label RSSI grids
+    for (tx_x, tx_y), labels in tx_label_map.items():
+        att_flat = np.zeros(N, dtype=np.float64)
+        
+        for ox, oy, ow, oh, att in obs_rects:
+            hits, inside = _ray_intersects_rect_vectorized(tx_x, tx_y, cx_flat, cy_flat, ox, oy, ow, oh)
+            att_flat[inside] += att * 2
+            att_flat[hits & ~inside] += att
+        
+        att_grid = att_flat.reshape(rows, cols)
+        
+        # Apply to each per-label RSSI grid belonging to this TX
+        for lbl in labels:
+            if lbl in result.rssi:
+                result.rssi[lbl] -= att_grid
+            if lbl in result.snr:
+                result.snr[lbl] -= att_grid
+    
+    # Recompute best_rssi from the now-attenuated per-TX grids
+    if result.rssi:
+        all_rssi = list(result.rssi.values())
+        result.best_rssi = np.maximum.reduce(all_rssi)
+    if result.snr:
+        all_snr = list(result.snr.values())
+        result.best_snr = np.maximum.reduce(all_snr)
 
 
 def run_simulation(config: SimConfig) -> Dict:
@@ -361,18 +450,25 @@ def run_simulation(config: SimConfig) -> Dict:
                 env.add_noise_source(ns)
     
     # Run simulation
-    sim = Simulation(env, pathloss_model="log-distance", pathloss_exponent=2.7)
+    pl_exp = ENV_PATH_LOSS_EXPONENT.get(config.environment_type, 2.7)
+    shadow_std = 4.0 if config.shadow_fading else 0.0
+    sim = Simulation(
+        env,
+        pathloss_model="log-distance",
+        pathloss_exponent=pl_exp,
+        shadow_fading_std=shadow_std,
+        multipath_fading=config.multipath_fading,
+    )
     result = sim.run()
     
     # ── Post-process: apply obstacle shadow attenuation to RSSI grid ──
     _apply_obstacle_shadows(result, config, device_info)
     
-    # Overall coverage stats
+    # Overall coverage stats (use worst-case sensitivity across all techs present)
     stats = sim.coverage_stats(result, sensitivity_dbm=-137.0)
     
     # Per-tech stats: compute from per-transmitter RSSI/SNR
     per_tech_stats = {}
-    tech_sensitivities = {"halow": -95.0, "lorawan": -137.0, "nbiot": -125.0}
     
     for tech in ["halow", "lorawan", "nbiot"]:
         tech_rssi_arrays = []
@@ -391,7 +487,17 @@ def run_simulation(config: SimConfig) -> Dict:
         if tech_rssi_arrays:
             best_rssi = np.maximum.reduce(tech_rssi_arrays)
             best_snr = np.maximum.reduce(tech_snr_arrays) if tech_snr_arrays else np.zeros_like(best_rssi)
-            sens = tech_sensitivities[tech]
+            # Per-tech sensitivity (for LoRaWAN, use worst SF present or default SF12)
+            tech_sens = TECH_SENSITIVITY.get(tech, -137.0)
+            if isinstance(tech_sens, dict):
+                # Find max SF used by this tech's devices
+                max_sf = 12
+                for dev in config.devices:
+                    if dev.get("type", "").startswith(tech):
+                        max_sf = max(max_sf, dev.get("spreading_factor", 12))
+                sens = tech_sens.get(max_sf, -137.0)
+            else:
+                sens = tech_sens
             total = best_rssi.size
             covered = int(np.sum(best_rssi >= sens))
             per_tech_stats[tech] = {

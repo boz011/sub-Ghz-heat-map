@@ -64,9 +64,6 @@ See [`examples/basic_simulation.py`](examples/basic_simulation.py) for a complet
 | **3** | `9159487` | Fix clone URL in README |
 | **4** | `da48e2c` | Interactive Web UI (FastAPI + Canvas), drag-and-drop devices, real-time heatmaps, obstacles (walls/houses/forests/ponds/water towers), zoom/pan, distance measurement, interference overlay, Leaflet.js map overlay |
 | **5** | `1d7a938` | Advanced propagation (environment selector, shadow fading, Rayleigh multipath), per-tech receiver sensitivity & noise figure, RSSI hover display, analytical link labels, viewport-filling canvas, vectorized numpy shadows, heatmap caching, 1000% zoom |
-| **6** | `5c53814` | Create LICENSE.md |
-| **7** | `3f26d42` | Delete LICENSE.md (consolidated) |
-| **8** | `39d000b` | Update LICENSE copyright to Boz |
 
 ## Project Structure
 

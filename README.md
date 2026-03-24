@@ -2,6 +2,9 @@
 
 A Python toolkit for simulating LPWAN (Low-Power Wide-Area Network) wireless environments. Model signal propagation, calculate SNR, analyse coverage, and generate publication-ready heatmaps — all on a configurable 2-D grid.
 
+
+![Image](https://github.com/user-attachments/assets/8beb3334-4b56-4b1e-8b22-fdf42b32161e)
+
 ## Features
 
 - **Multi-protocol support** — LoRaWAN (EU868/US915), NB-IoT (B1–B28), Wi-Fi HaLow (802.11ah)
